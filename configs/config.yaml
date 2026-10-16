@@ -1,0 +1,29 @@
+defaults:
+  - dataset: custom
+  - frontend: klt
+  - backend: window
+  - gs: default
+  - _self_
+
+# stages, in order. viz (viser on a finished run) and gs (3DGS, GPU) are opt-in: stages=[gs]
+stages: [vo, eval]
+
+output_dir: outputs/${dataset.name}/${sequence}/${frontend.name}_${backend.name}
+sequence: ???
+seed: 0
+
+hydra:
+  run:
+    dir: ${output_dir}
+  job:
+    chdir: false
+
+# viewer=true opens a live viser window during vo (headless is the default)
+viewer: false
+viewer_opts:
+  port: 8080
+  fps: 30
+  point_size: 0.01
+  frustum_scale: 0.15
+  open_browser: true
+  wait_for_client_s: 30   # start vo once a browser connects (or after this timeout)

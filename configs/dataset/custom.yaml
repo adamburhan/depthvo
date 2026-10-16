@@ -1,0 +1,9 @@
+# Any folder of frames + an intrinsics yaml (see README for the format).
+name: custom
+image_dir: data/${sequence}/images
+intrinsics: data/${sequence}/intrinsics.yaml
+depth_dir: null          # optional: folder of 16-bit PNG depth, same names as images
+depth_scale: 1000.0      # depth_png / depth_scale = metres
+gt_trajectory: null      # optional TUM-format file for eval
+stride: 1
+max_frames: null

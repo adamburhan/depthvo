@@ -1,0 +1,4 @@
+# source env/gaussian_splatting.activate   (before `stages=[gs]` or the notebook)
+type deactivate >/dev/null 2>&1 && deactivate
+source "${ENV_DIR:-$HOME/envs/gaussian_splatting}/bin/activate"
+export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1   # checkpoint loads under torch>=2.6

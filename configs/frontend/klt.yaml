@@ -1,0 +1,9 @@
+name: klt
+max_features: 400
+min_features: 200
+quality_level: 0.01
+min_distance_px: 10
+fb_threshold_px: 1.0
+keyframe:
+  min_tracked_ratio: 0.6
+  min_parallax_px: 40.0

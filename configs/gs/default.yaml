@@ -1,0 +1,7 @@
+# gs stage: graphdeco 3DGS on the vo output, run with the interpreter of the env
+# built by env/gaussian_splatting.sh (not depthvo's venv).
+python: ${oc.env:HOME}/envs/gaussian_splatting/bin/python
+iterations: 7000
+resolution: 1        # downscale factor for training images (1 = full)
+eval: true           # hold out every 8th keyframe as test views (llffhold)
+data_device: cpu     # images stay on the CPU; fine for a few hundred frames

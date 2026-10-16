@@ -1,0 +1,11 @@
+# TUM RGB-D. Intrinsics follow the dataset's advice (ROS default, no undistortion,
+# see intrinsics/tum_freiburg*.yaml). Timestamps come from the png filenames.
+name: tum_rgbd
+calib: freiburg1          # freiburg1 | freiburg2 | freiburg3, must match `sequence`
+image_dir: data/tum/${sequence}/rgb
+intrinsics: configs/dataset/intrinsics/tum_${dataset.calib}.yaml
+depth_dir: data/tum/${sequence}/depth
+depth_scale: 5000.0
+gt_trajectory: data/tum/${sequence}/groundtruth.txt
+stride: 1
+max_frames: null

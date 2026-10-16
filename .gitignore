@@ -1,0 +1,10 @@
+*.egg-info/
+*.ipynb_checkpoints
+*.pyc
+.ipynb_checkpoints/
+.venv/
+__pycache__/
+data/
+env/*.log
+multirun/
+outputs/

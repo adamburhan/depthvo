@@ -1,0 +1,10 @@
+# TUM RGB-D freiburg2, ROS default set as the dataset page recommends: the
+# depth PNGs are registered to the DISTORTED rgb frames, so we do not undistort.
+fx: 525.0
+fy: 525.0
+cx: 319.5
+cy: 239.5
+width: 640
+height: 480
+dist: [0, 0, 0, 0, 0]
+# measured: fx 520.9 fy 521.0 cx 325.1 cy 249.7 dist [0.2312, -0.7849, -0.0033, -0.0001, 0.9172]

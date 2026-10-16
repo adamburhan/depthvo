@@ -1,0 +1,9 @@
+name: window
+window: 8            # keyframes kept in the batch solve
+old_keyframes: fix   # fix: keyframes that left the window stay as fixed cameras | drop: ignore them
+pixel_sigma: 1.0
+huber_k: 1.345
+lm_max_iters: 20
+ransac_px: 1.0       # essential matrix / PnP inlier threshold
+max_reproj_px: 2.0   # triangulation acceptance and post-solve landmark cull
+min_parallax_deg: 1.0
