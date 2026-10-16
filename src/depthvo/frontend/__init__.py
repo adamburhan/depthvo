@@ -8,4 +8,7 @@ def build_frontend(cfg, intrinsics):
     if cfg.name == "klt":
         from depthvo.frontend.klt import KLTFrontend
         return KLTFrontend(cfg, intrinsics)
+    if cfg.name == "orb":
+        from depthvo.frontend.orb import ORBFrontend
+        return ORBFrontend(cfg, intrinsics)
     raise ValueError(f"unknown frontend {cfg.name!r}")

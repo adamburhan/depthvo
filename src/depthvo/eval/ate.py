@@ -29,7 +29,10 @@ def ate_rmse(est_path, gt_path, with_scale=True, max_dt=0.02, plot_path=None):
     s, R, t = umeyama_sim3(src, dst, with_scale)
     aligned = (s * (R @ src.T)).T + t
     err = np.linalg.norm(dst - aligned, axis=1)
+    s1, R1, t1 = umeyama_sim3(src, dst, with_scale=False)
+    err_se3 = np.linalg.norm(dst - (R1 @ src.T).T - t1, axis=1)
     if plot_path is not None:
         from depthvo.eval.plot import plot_trajectory
         plot_trajectory(aligned, dst, [ts_e[i] for i, _ in pairs], plot_path)
-    return {"ate_rmse": float(np.sqrt(np.mean(err**2))), "scale": float(s), "n": len(pairs)}
+    return {"ate_rmse": float(np.sqrt(np.mean(err**2))), "scale": float(s),
+            "ate_rmse_se3": float(np.sqrt(np.mean(err_se3**2))), "n": len(pairs)}

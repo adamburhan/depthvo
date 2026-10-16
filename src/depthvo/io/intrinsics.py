@@ -31,6 +31,13 @@ class Intrinsics:
         # Same K out as in: keeps the yaml's K valid for the undistorted stream.
         return cv2.undistort(img, self.K, self.dist, None, self.K) if self.has_distortion else img
 
+    def undistort_depth(self, depth):
+        """Same map as undistort(), nearest-neighbour so depth edges are not blended."""
+        if not self.has_distortion:
+            return depth
+        m1, m2 = cv2.initUndistortRectifyMap(self.K, self.dist, None, self.K, (self.width, self.height), cv2.CV_32FC1)
+        return cv2.remap(depth, m1, m2, cv2.INTER_NEAREST, borderValue=np.nan)
+
     @classmethod
     def load(cls, path):
         d = yaml.safe_load(open(path))

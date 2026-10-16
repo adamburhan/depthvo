@@ -6,8 +6,9 @@ on its output.
 - **Input**: a folder of frames and an intrinsics file.
 - **Output**: the camera trajectory (TUM format, every frame) and a sparse map with keyframe
   poses (COLMAP format), which is what 3DGS trains from.
-- **Pipeline**: OpenCV KLT frontend → keyframes → sliding-window bundle adjustment in GTSAM
-  → PnP for the frames in between. Other frontends plug in through `src/depthvo/frontend/`.
+- **Pipeline**: OpenCV frontend (KLT tracking or ORB matching) → keyframes → sliding-window
+  bundle adjustment in GTSAM → PnP for the frames in between. With depth maps, a depth
+  constraint per observation makes the map metric.
 
 ## Setup
 
@@ -22,6 +23,7 @@ Python 3.13 and [uv](https://docs.astral.sh/uv/). Runs on macOS and Linux, CPU o
     uv run run.py dataset=tum_rgbd sequence=freiburg1_xyz
     uv run run.py dataset=tum_rgbd sequence=freiburg1_xyz viewer=true   # watch it live (browser)
     uv run run.py dataset=tum_rgbd sequence=freiburg1_xyz 'stages=[viz]' # view a finished run
+    uv run run.py dataset=tum_rgbd sequence=freiburg1_xyz frontend=orb backend=window_depth
 
 Results go to `outputs/<dataset>/<sequence>/<frontend>_<backend>/`:
 
@@ -32,10 +34,21 @@ Results go to `outputs/<dataset>/<sequence>/<frontend>_<backend>/`:
 | `ate.json`, `ate.png` | ATE after Sim(3) alignment, when the dataset has ground truth |
 
 Options are Hydra overrides of the files in `configs/`. The ones worth knowing:
-`dataset.stride`, `dataset.max_frames`, `backend.window` (keyframes per solve) and
-`backend.old_keyframes` (`fix`: keyframes that left the window stay as fixed cameras,
-consistent map; `drop`: ignore them, slightly better trajectory). On TUM freiburg1_xyz
-the ATE is about 5 cm either way.
+`frontend=klt|orb`, `backend=window|window_depth` (depth constraints from
+`dataset.depth_dir`, metric map), `dataset.stride`, `dataset.max_frames`, `backend.window`
+(keyframes per solve) and `backend.old_keyframes` (`fix`: keyframes that left the window
+stay as fixed cameras, consistent map; `drop`: ignore them, slightly better trajectory).
+`ate.json` reports the ATE after Sim(3) alignment (monocular) and after SE(3) alignment
+(the meaningful one when depth made the map metric).
+
+Reference numbers on TUM freiburg1_xyz (798 frames, ~30 s on a laptop CPU):
+
+| frontend | backend | ATE RMSE Sim(3) | ATE RMSE SE(3) | scale |
+|---|---|---|---|---|
+| klt | window | 5.5 cm | n/a (monocular) | arbitrary |
+| orb | window | 4.7 cm | n/a (monocular) | arbitrary |
+| klt | window_depth | 4.3 cm | 4.3 cm | metric (0.99) |
+| orb | window_depth | 4.4 cm | 4.4 cm | metric (0.98) |
 
 ### Intrinsics file
 

@@ -7,3 +7,8 @@ lm_max_iters: 20
 ransac_px: 1.0       # essential matrix / PnP inlier threshold
 max_reproj_px: 2.0   # triangulation acceptance and post-solve landmark cull
 min_parallax_deg: 1.0
+depth:               # per-observation depth constraints (dataset.depth_dir); makes the map metric
+  enabled: false
+  sigma_rel: 0.05    # relative depth error, 5%
+  min_m: 0.3         # accept measured depths in [min_m, max_m]
+  max_m: 8.0

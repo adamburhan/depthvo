@@ -32,6 +32,12 @@ def stage_vo(cfg: DictConfig) -> None:
     seq = ImageSequence(cfg.dataset.image_dir, intr, cfg.dataset.stride, cfg.dataset.max_frames)
     frontend = build_frontend(cfg.frontend, intr)
     backend = SlidingWindowBackend(cfg.backend, intr)
+    depth = None
+    if cfg.backend.depth.enabled:
+        from depthvo.io.depth import DepthSource
+        if cfg.dataset.depth_dir is None:
+            raise ValueError("backend.depth.enabled needs dataset.depth_dir")
+        depth = DepthSource(cfg.dataset.depth_dir, cfg.dataset.depth_scale, intr)
     viewer = None
     if cfg.viewer:
         from depthvo.viz.live import LiveViewer
@@ -39,7 +45,7 @@ def stage_vo(cfg: DictConfig) -> None:
     for frame in seq:
         tracks = frontend.process(frame)
         if tracks.is_keyframe:
-            backend.add_keyframe(tracks, gray=frame.gray)
+            backend.add_keyframe(tracks, gray=frame.gray, depth=depth.get(frame) if depth else None)
         else:
             backend.track_frame(tracks)
         if viewer:
@@ -70,7 +76,8 @@ def stage_eval(cfg: DictConfig) -> None:
     out = Path(cfg.output_dir)
     res = ate_rmse(out / "traj.txt", cfg.dataset.gt_trajectory, plot_path=out / "ate.png")
     (out / "ate.json").write_text(json.dumps(res, indent=2))
-    log.info(f"ATE RMSE {res['ate_rmse']:.4f} m over {res['n']} poses (scale {res['scale']:.3f}), plot {out / 'ate.png'}")
+    log.info(f"ATE RMSE {res['ate_rmse']:.4f} m (Sim3, scale {res['scale']:.3f}) / "
+             f"{res['ate_rmse_se3']:.4f} m (SE3) over {res['n']} poses, plot {out / 'ate.png'}")
 
 
 GS_REPO = Path(__file__).resolve().parent / "third_party" / "gaussian-splatting"

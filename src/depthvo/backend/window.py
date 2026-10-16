@@ -17,6 +17,7 @@ import gtsam
 import numpy as np
 from gtsam.symbol_shorthand import L, X
 
+from depthvo.backend.depth_factor import make_depth_factor
 from depthvo.geometry.transforms import inv, opencv_relative_to_T_c1_c2, se3
 
 log = logging.getLogger(__name__)
@@ -27,6 +28,8 @@ class SlidingWindowBackend:
         self.cfg = cfg
         self.K_np = intrinsics.K
         self.K = gtsam.Cal3_S2(intrinsics.fx, intrinsics.fy, 0.0, intrinsics.cx, intrinsics.cy)
+        self.K_inv = np.linalg.inv(intrinsics.K)
+        self.depth_obs = {}   # track_id -> {kf_idx: measured depth (m)}, when depth is enabled
         self.poses = {}       # kf_idx -> T_w_c (4x4)
         self.landmarks = {}   # track_id -> xyz (3,) world
         self.obs = {}         # track_id -> [(kf_idx, uv)]
@@ -42,7 +45,9 @@ class SlidingWindowBackend:
 
     # ---- per-frame API -------------------------------------------------------
 
-    def add_keyframe(self, tracks, gray=None):
+    def add_keyframe(self, tracks, gray=None, depth=None):
+        """depth: optional (H, W) metres (NaN = none), sampled at the tracks when
+        cfg.depth.enabled."""
         i = len(self.kf_meta)
         self.kf_meta.append((tracks.name, tracks.timestamp))
         for tid, uv in zip(tracks.track_ids.tolist(), tracks.uv):
@@ -50,14 +55,20 @@ class SlidingWindowBackend:
                 self.obs.setdefault(tid, []).append((i, np.asarray(uv, float)))
                 if gray is not None and tid not in self.colors:
                     self.colors[tid] = int(gray[int(uv[1]), int(uv[0])])
+                if depth is not None:
+                    d = depth[min(int(round(uv[1])), depth.shape[0] - 1), min(int(round(uv[0])), depth.shape[1] - 1)]
+                    if np.isfinite(d) and self.cfg.depth.min_m <= d <= self.cfg.depth.max_m:
+                        self.depth_obs.setdefault(tid, {})[i] = float(d)
         if i == 0:
             self.poses[0] = np.eye(4)
         elif i == 1:
             self.poses[1] = self._two_view_init(0, 1)
         else:
             T = self._pnp(tracks)
-            self.poses[i] = self.poses[i - 1].copy() if T is None else T
+            self.poses[i] = self._predict() if T is None else T
         n_new = self._triangulate_new(i)
+        if i == 1 and self.cfg.depth.enabled:
+            self._set_metric_scale()
         stats = self._solve_window() if i >= 1 else {}
         self.frames.append((tracks.timestamp, tracks.name, i, np.eye(4)))
         log.info(f"kf {i} ({tracks.name}): +{n_new} landmarks, {len(self.landmarks)} total, {stats}")
@@ -67,8 +78,15 @@ class SlidingWindowBackend:
         kf = len(self.kf_meta) - 1
         T_w_c = self._pnp(tracks)
         if T_w_c is None:
-            T_w_c = self.poses[kf]
+            T_w_c = self._predict()
         self.frames.append((tracks.timestamp, tracks.name, kf, inv(self.poses[kf]) @ T_w_c))
+
+    def _predict(self):
+        """Constant-velocity guess from the last two frame poses (PnP failed or no landmarks)."""
+        if len(self.frames) < 2:
+            return self.current_pose()
+        T1, T0 = self.current_pose(), self.poses[self.frames[-2][2]] @ self.frames[-2][3]
+        return T1 @ (inv(T0) @ T1)
 
     def current_pose(self):
         t, n, k, rel = self.frames[-1]
@@ -89,6 +107,22 @@ class SlidingWindowBackend:
             if i in d and j in d:
                 ids.append(tid); ui.append(d[i]); uj.append(d[j])
         return np.array(ids), np.array(ui).reshape(-1, 2), np.array(uj).reshape(-1, 2)
+
+    def _set_metric_scale(self):
+        """After the unit-baseline init: scale the map so triangulated depths match
+        the measured ones (median ratio), so the first solve starts near metric."""
+        ratios = [d / self._depth(self.poses[k], self.landmarks[tid])
+                  for tid, dk in self.depth_obs.items() if tid in self.landmarks
+                  for k, d in dk.items() if k in self.poses and self._depth(self.poses[k], self.landmarks[tid]) > 0]
+        if len(ratios) < 10:
+            log.warning(f"metric scale: only {len(ratios)} depth measurements, keeping unit baseline")
+            return
+        s = float(np.median(ratios))
+        for k in self.poses:
+            self.poses[k][:3, 3] *= s
+        for tid in self.landmarks:
+            self.landmarks[tid] = self.landmarks[tid] * s
+        log.info(f"metric scale from {len(ratios)} depths: x{s:.3f}")
 
     def _two_view_init(self, i, j):
         ids, ui, uj = self._corr(i, j)
@@ -172,9 +206,10 @@ class SlidingWindowBackend:
         graph, values = gtsam.NonlinearFactorGraph(), gtsam.Values()
         for i in window:
             values.insert(X(i), gtsam.Pose3(self.poses[i]))
-        for i in window[:2]:   # gauge + scale anchor
+        # gauge anchor; without depth the second prior also pins the (arbitrary) scale
+        for i in window[:1 if self.cfg.depth.enabled else 2]:
             graph.add(gtsam.PriorFactorPose3(X(i), gtsam.Pose3(self.poses[i]), self.prior_noise))
-        active, fixed = {}, set()
+        active, fixed, n_depth = {}, set(), 0
         for tid, xyz in self.landmarks.items():
             ob = [(i, uv) for i, uv in self.obs[tid] if i in self.poses]
             if not fix:
@@ -189,6 +224,10 @@ class SlidingWindowBackend:
                     graph.add(gtsam.PriorFactorPose3(X(i), gtsam.Pose3(self.poses[i]), self.fixed_noise))
                     fixed.add(i)
                 graph.add(gtsam.GenericProjectionFactorCal3_S2(uv, self.pix_noise, X(i), L(tid), self.K))
+                d = self.depth_obs.get(tid, {}).get(i)
+                if d is not None and self.cfg.depth.enabled:
+                    graph.add(make_depth_factor(X(i), L(tid), d, uv, self.K_inv, self.cfg.depth.sigma_rel, self.cfg.huber_k))
+                    n_depth += 1
         if not active:
             return {"solved": False}
         params = gtsam.LevenbergMarquardtParams()
@@ -206,6 +245,6 @@ class SlidingWindowBackend:
                 self._cull(tid); culled += 1
             else:
                 errs.append(e)
-        return {"win": len(window), "fixed": len(fixed), "lm": len(active), "iters": opt.iterations(),
+        return {"win": len(window), "fixed": len(fixed), "lm": len(active), "depth": n_depth, "iters": opt.iterations(),
                 "err": f"{e0:.0f}->{graph.error(result):.0f}",
                 "reproj_px": f"{np.mean(errs):.2f}", "culled": culled}

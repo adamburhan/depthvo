@@ -1,0 +1,8 @@
+name: orb
+n_features: 3000      # dense enough to survive motion blur; 1500 starves the map on TUM fr1
+ratio: 0.8
+ransac_px: 1.0
+keep_keyframes: 4      # tracks stay matchable for this many keyframes after their last observation
+keyframe:
+  min_tracked_ratio: 0.6   # vs. the matches to the last keyframe right after it was made
+  min_parallax_px: 40.0
