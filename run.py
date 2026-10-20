@@ -12,6 +12,8 @@ import json
 import logging
 from pathlib import Path
 
+import numpy as np
+
 import hydra
 from omegaconf import DictConfig
 
@@ -19,45 +21,29 @@ log = logging.getLogger(__name__)
 
 
 def stage_vo(cfg: DictConfig) -> None:
-    from depthvo.backend.window import SlidingWindowBackend
-    from depthvo.frontend import build_frontend
-    from depthvo.io.intrinsics import Intrinsics
-    from depthvo.io.sequence import ImageSequence
-    from depthvo.io.colmap_writer import write_colmap_model
-    from depthvo.io.trajectory import write_tum
+    from depthvo import DepthSource, ImageSequence, Intrinsics, VisualOdometry
 
-    import cv2
-    cv2.setRNGSeed(cfg.seed)   # RANSAC in findEssentialMat / solvePnPRansac
     intr = Intrinsics.load(cfg.dataset.intrinsics)
     seq = ImageSequence(cfg.dataset.image_dir, intr, cfg.dataset.stride, cfg.dataset.max_frames)
-    frontend = build_frontend(cfg.frontend, intr)
-    backend = SlidingWindowBackend(cfg.backend, intr)
     depth = None
     if cfg.backend.depth.enabled:
-        from depthvo.io.depth import DepthSource
         if cfg.dataset.depth_dir is None:
             raise ValueError("backend.depth.enabled needs dataset.depth_dir")
         depth = DepthSource(cfg.dataset.depth_dir, cfg.dataset.depth_scale, intr)
+    vo = VisualOdometry(intr, cfg.frontend, cfg.backend, depth=depth, seed=cfg.seed)
     viewer = None
     if cfg.viewer:
         from depthvo.viz.live import LiveViewer
         viewer = LiveViewer(cfg.viewer_opts, intr)
     for frame in seq:
-        tracks = frontend.process(frame)
-        if tracks.is_keyframe:
-            backend.add_keyframe(tracks, gray=frame.gray, depth=depth.get(frame) if depth else None)
-        else:
-            backend.track_frame(tracks)
+        r = vo.step(frame)
         if viewer:
-            viewer.update(frame, tracks, backend)
-    ts, names, poses = backend.trajectory()
-    out = Path(cfg.output_dir)
-    write_tum(out / "traj.txt", ts, poses)
-    log.info(f"wrote {len(poses)} poses ({len(backend.kf_meta)} keyframes) to {out / 'traj.txt'}")
-    rec = write_colmap_model(
-        out / "sparse" / "0", intr, [n for n, _ in backend.kf_meta], backend.poses,
-        backend.landmarks, backend.obs, {t: (g, g, g) for t, g in backend.colors.items()})
-    log.info(f"wrote COLMAP model: {rec.summary()}")
+            viewer.update(frame, r, vo)
+    out = vo.save(cfg.output_dir)
+    kf = vo.keyframes
+    log.info(f"wrote {len(vo.results)} poses ({len(kf)} keyframes) to {out}: traj.txt, sparse/0, reproj.csv")
+    log.info(f"keyframe reprojection rms, mean over keyframes: before solve "
+             f"{np.nanmean([r.reproj_before.rms for r in kf[1:]]):.2f} px -> after {np.nanmean([r.reproj_after.rms for r in kf[1:]]):.2f} px")
     if viewer:
         viewer.block()
 
@@ -70,10 +56,14 @@ def stage_viz(cfg: DictConfig) -> None:
 
 def stage_eval(cfg: DictConfig) -> None:
     from depthvo.eval.ate import ate_rmse
-    if cfg.dataset.gt_trajectory is None:
-        log.warning("no gt_trajectory for this dataset, skipping eval")
-        return
+    from depthvo.eval.plot import plot_reproj
     out = Path(cfg.output_dir)
+    if (out / "reproj.csv").exists():
+        plot_reproj(out / "reproj.csv", out / "reproj.png")
+        log.info(f"reprojection plot {out / 'reproj.png'}")
+    if cfg.dataset.gt_trajectory is None:
+        log.warning("no gt_trajectory for this dataset, skipping ATE")
+        return
     res = ate_rmse(out / "traj.txt", cfg.dataset.gt_trajectory, plot_path=out / "ate.png")
     (out / "ate.json").write_text(json.dumps(res, indent=2))
     log.info(f"ATE RMSE {res['ate_rmse']:.4f} m (Sim3, scale {res['scale']:.3f}) / "

@@ -40,18 +40,26 @@ class LiveViewer:
         while not self.server.get_clients() and time.time() - t0 < cfg.wait_for_client_s:
             time.sleep(0.1)
 
-    def update(self, frame, tracks, backend):
-        self.image.image = self._draw(frame, tracks)
-        if tracks.is_keyframe:
-            self.kf_uv = dict(zip(tracks.track_ids.tolist(), tracks.uv))
+    def update(self, frame, result, vo):
+        """result: the FrameResult of vo.step(frame)."""
+        backend = vo.backend
+        ids, uv = backend.frame_obs[result.index]
+        img = self._draw(frame, uv, ids)
+        if result.is_keyframe:
+            cv2.rectangle(img, (0, 0), (img.shape[1] - 1, img.shape[0] - 1), (255, 0, 0), 6)
+        self.image.image = img
+        if result.is_keyframe:
+            self.kf_uv = dict(zip(ids.tolist(), uv))
             self.n_kf += 1
             self._update_map(backend)
-        T = backend.current_pose()
+        T = result.pose
         self.server.scene.add_camera_frustum(
             "/current", self.fov, self.aspect, scale=self.cfg.frustum_scale, color=(255, 80, 0),
             wxyz=self._wxyz(T), position=T[:3, 3])
+        rp = (f"reproj {result.reproj_before.rms:.2f} -> {result.reproj_after.rms:.2f} px"
+              if result.is_keyframe else f"reproj {result.reproj_after.rms:.2f} px")
         self.status.content = (f"frame {frame.idx}  |  keyframes {self.n_kf}  |  "
-                               f"landmarks {len(backend.landmarks)}  |  tracks {len(tracks.uv)}")
+                               f"landmarks {len(backend.landmarks)}  |  tracks {len(uv)}  |  {rp}")
         # pace to at most cfg.fps so the browser can keep up
         dt = 1.0 / self.cfg.fps - (time.time() - self.t_last)
         if dt > 0:
@@ -68,15 +76,13 @@ class LiveViewer:
 
     # ---- helpers -------------------------------------------------------------
 
-    def _draw(self, frame, tracks):
+    def _draw(self, frame, uvs, ids):
         img = cv2.cvtColor(frame.gray, cv2.COLOR_GRAY2RGB)
-        for uv, tid in zip(tracks.uv, tracks.track_ids.tolist()):
+        for uv, tid in zip(uvs, ids.tolist()):
             p = tuple(int(round(x)) for x in uv)
             if tid in self.kf_uv:
                 cv2.line(img, tuple(int(round(x)) for x in self.kf_uv[tid]), p, (0, 200, 0), 1)
             cv2.circle(img, p, 2, (0, 200, 0) if tid in self.kf_uv else (0, 128, 255), -1)
-        if tracks.is_keyframe:
-            cv2.rectangle(img, (0, 0), (img.shape[1] - 1, img.shape[0] - 1), (255, 0, 0), 6)
         return img
 
     def _update_map(self, backend):

@@ -11,6 +11,7 @@ stored relative to their keyframe so later refinements carry over.
 """
 
 import logging
+from dataclasses import dataclass
 
 import cv2
 import gtsam
@@ -21,6 +22,30 @@ from depthvo.backend.depth_factor import make_depth_factor
 from depthvo.geometry.transforms import inv, opencv_relative_to_T_c1_c2, se3
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class ReprojStats:
+    """Reprojection error of one frame's observations against the map (pixels)."""
+    n: int            # observations with a triangulated landmark
+    rms: float
+    median: float
+
+    def __str__(self):
+        return f"{self.rms:.2f} px rms / {self.median:.2f} median over {self.n}" if self.n else "no landmarks"
+
+
+@dataclass
+class SolveStats:
+    """One sliding-window solve."""
+    window: int           # keyframes optimised
+    fixed: int            # older keyframes kept as fixed cameras
+    landmarks: int
+    depth_factors: int
+    iterations: int
+    cost_before: float    # GTSAM graph error (sum of squared whitened residuals)
+    cost_after: float
+    culled: int           # landmarks dropped after the solve (reprojection > max_reproj_px)
 
 
 class SlidingWindowBackend:
@@ -34,7 +59,8 @@ class SlidingWindowBackend:
         self.landmarks = {}   # track_id -> xyz (3,) world
         self.obs = {}         # track_id -> [(kf_idx, uv)]
         self.kf_meta = []     # (name, timestamp)
-        self.frames = []      # (timestamp, name, kf_idx, T_ckf_c) for EVERY frame
+        self.frames = []      # (timestamp, name, kf_idx, T_ckf_c) for every frame
+        self.frame_obs = []   # (track_ids, uv) for EVERY frame, same order as self.frames
         self.bad = set()      # track ids culled as outliers; never retried
         self.colors = {}      # track id -> gray intensity at first keyframe observation
         self.pix_noise = gtsam.noiseModel.Robust.Create(
@@ -69,9 +95,14 @@ class SlidingWindowBackend:
         n_new = self._triangulate_new(i)
         if i == 1 and self.cfg.depth.enabled:
             self._set_metric_scale()
-        stats = self._solve_window() if i >= 1 else {}
         self.frames.append((tracks.timestamp, tracks.name, i, np.eye(4)))
-        log.info(f"kf {i} ({tracks.name}): +{n_new} landmarks, {len(self.landmarks)} total, {stats}")
+        self.frame_obs.append((tracks.track_ids.copy(), tracks.uv.astype(float)))
+        before = self.reprojection_error(len(self.frames) - 1)
+        solve = self._solve_window() if i >= 1 else None
+        after = self.reprojection_error(len(self.frames) - 1)
+        log.info(f"kf {i} ({tracks.name}): +{n_new} landmarks, {len(self.landmarks)} total, "
+                 f"reproj {before} -> {after}, {solve}")
+        return n_new, before, after, solve
 
     def track_frame(self, tracks):
         """Non-keyframe: PnP pose, stored relative to the latest keyframe."""
@@ -80,6 +111,7 @@ class SlidingWindowBackend:
         if T_w_c is None:
             T_w_c = self._predict()
         self.frames.append((tracks.timestamp, tracks.name, kf, inv(self.poses[kf]) @ T_w_c))
+        self.frame_obs.append((tracks.track_ids.copy(), tracks.uv.astype(float)))
 
     def _predict(self):
         """Constant-velocity guess from the last two frame poses (PnP failed or no landmarks)."""
@@ -89,8 +121,32 @@ class SlidingWindowBackend:
         return T1 @ (inv(T0) @ T1)
 
     def current_pose(self):
-        t, n, k, rel = self.frames[-1]
+        return self.pose(len(self.frames) - 1)
+
+    def pose(self, frame):
+        """T_w_c of a processed frame (by index in processing order), as of now:
+        keyframe refinements since then are included."""
+        t, n, k, rel = self.frames[frame]
         return self.poses[k] @ rel
+
+    def reprojection_error(self, frame) -> ReprojStats:
+        """Reprojection error of a frame's observations against the CURRENT pose
+        and landmarks. Keyframes: all their tracks with a landmark. Other frames:
+        the tracks PnP saw. Re-asking later reflects later refinements."""
+        ids, uv = self.frame_obs[frame]
+        T_c_w = inv(self.pose(frame))
+        errs = []
+        for tid, p in zip(ids.tolist(), uv):
+            xyz = self.landmarks.get(tid)
+            if xyz is None:
+                continue
+            q = self.K_np @ (T_c_w @ np.append(xyz, 1.0))[:3]
+            if q[2] > 0:
+                errs.append(np.linalg.norm(q[:2] / q[2] - p))
+        if not errs:
+            return ReprojStats(0, float("nan"), float("nan"))
+        e = np.array(errs)
+        return ReprojStats(len(e), float(np.sqrt(np.mean(e**2))), float(np.median(e)))
 
     def trajectory(self):
         """-> (timestamps, names, [T_w_c]) for every frame, keyframes refined."""
@@ -229,7 +285,7 @@ class SlidingWindowBackend:
                     graph.add(make_depth_factor(X(i), L(tid), d, uv, self.K_inv, self.cfg.depth.sigma_rel, self.cfg.huber_k))
                     n_depth += 1
         if not active:
-            return {"solved": False}
+            return None
         params = gtsam.LevenbergMarquardtParams()
         params.setMaxIterations(self.cfg.lm_max_iters)
         opt = gtsam.LevenbergMarquardtOptimizer(graph, values, params)
@@ -245,6 +301,5 @@ class SlidingWindowBackend:
                 self._cull(tid); culled += 1
             else:
                 errs.append(e)
-        return {"win": len(window), "fixed": len(fixed), "lm": len(active), "depth": n_depth, "iters": opt.iterations(),
-                "err": f"{e0:.0f}->{graph.error(result):.0f}",
-                "reproj_px": f"{np.mean(errs):.2f}", "culled": culled}
+        return SolveStats(len(window), len(fixed), len(active), n_depth, opt.iterations(),
+                          float(e0), float(graph.error(result)), culled)

@@ -28,3 +28,24 @@ def plot_trajectory(est_xyz, gt_xyz, timestamps, out_path, title=""):
         fig.suptitle(title)
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
+
+
+def plot_reproj(csv_path, out_path):
+    """Per-frame reprojection rms before / after the solve, keyframes marked."""
+    import csv
+    rows = list(csv.DictReader(open(csv_path)))
+    idx = np.array([int(r["index"]) for r in rows])
+    kf = np.array([r["is_keyframe"] == "1" for r in rows])
+    before = np.array([float(r["rms_before"]) for r in rows])
+    after = np.array([float(r["rms_after"]) for r in rows])
+    now = np.array([float(r["rms_now"]) for r in rows])
+    fig, ax = plt.subplots(figsize=(12, 3.8), constrained_layout=True)
+    ax.plot(idx, now, color="0.6", lw=0.8, label="all frames, vs final map")
+    ax.plot(idx[kf], before[kf], "o", color="C3", ms=3, label="keyframes, before solve (PnP pose)")
+    ax.plot(idx[kf], after[kf], "o", color="C0", ms=3, label="keyframes, after solve")
+    ax.set_xlabel("frame"); ax.set_ylabel("reprojection rms [px]")
+    ax.set_ylim(0, np.nanpercentile(np.concatenate([before[kf], now]), 99) * 1.1)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.legend(fontsize=9, loc="upper right", ncol=3)
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)

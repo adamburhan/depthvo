@@ -31,6 +31,7 @@ Results go to `outputs/<dataset>/<sequence>/<frontend>_<backend>/`:
 |---|---|
 | `traj.txt` | pose per frame, TUM format `t tx ty tz qx qy qz qw` |
 | `sparse/0/` | COLMAP model: keyframe poses, landmarks, observations |
+| `reproj.csv`, `reproj.png` | per-frame reprojection error before / after the window solve |
 | `ate.json`, `ate.png` | ATE after Sim(3) alignment, when the dataset has ground truth |
 
 Options are Hydra overrides of the files in `configs/`. The ones worth knowing:
@@ -64,6 +65,35 @@ Reference numbers on TUM freiburg1_xyz (798 frames, ~30 s on a laptop CPU):
 
 Unpack a sequence to `data/tum/<sequence>/` (the folder with `rgb/` and `groundtruth.txt`)
 and set `dataset.calib` to its Freiburg number (`freiburg1` by default).
+
+## As a library
+
+`run.py` is a thin wrapper around one class; use it directly for anything the CLI
+does not cover:
+
+```python
+from depthvo import VisualOdometry, Intrinsics, ImageSequence, DepthSource
+
+intr = Intrinsics.load("data/my_seq/intrinsics.yaml")
+vo = VisualOdometry(intr, frontend="klt", backend="window")      # names of files in configs/, or dicts
+for frame in ImageSequence("data/my_seq/images", intr):
+    r = vo.step(frame)          # FrameResult
+    r.pose                      # T_w_c (4x4) at this step
+    r.is_keyframe, r.n_tracks
+    r.reproj_before             # this frame's observations vs the map, pose from PnP / init
+    r.reproj_after              # same after the window solve (ReprojStats: n, rms, median, in px)
+    r.solve                     # SolveStats of the solve a keyframe triggered (landmarks, iterations, cost)
+
+vo.pose(312)                    # any processed frame, by index or file name, including later refinements
+vo.reprojection_error(312)      # re-evaluated against the current map
+vo.trajectory()                 # (timestamps, names, [T_w_c])
+vo.backend.poses, vo.backend.landmarks, vo.backend.obs    # the map itself
+vo.save("outputs/my_run")       # traj.txt, sparse/0, reproj.csv
+```
+
+`reproj.csv` has one row per frame: observations with a landmark, rms and median
+reprojection error before and after that frame's solve, and against the final map.
+With `backend="window_depth"` pass `depth=DepthSource(depth_dir, depth_scale, intr)`.
 
 ## 3D Gaussian Splatting demo
 
