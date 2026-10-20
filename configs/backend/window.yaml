@@ -7,8 +7,12 @@ lm_max_iters: 20
 ransac_px: 1.0       # essential matrix / PnP inlier threshold
 max_reproj_px: 2.0   # triangulation acceptance and post-solve landmark cull
 min_parallax_deg: 1.0
-depth:               # per-observation depth constraints (dataset.depth_dir); makes the map metric
+depth:               # per-observation depth constraints from dataset.depth_dir
   enabled: false
+  source: metric     # metric: sensor / metric network, makes the map metric
+                     # relative: scale-ambiguous network; each keyframe's scale is fitted to the
+                     #   triangulated landmarks it sees (map scale stays monocular)
   sigma_rel: 0.05    # relative depth error, 5%
+  min_anchors: 20    # relative: landmarks needed to fit a keyframe's scale, else no depth factors for it
   min_m: 0.3         # accept measured depths in [min_m, max_m]
   max_m: 8.0

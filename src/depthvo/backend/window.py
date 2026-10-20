@@ -5,7 +5,9 @@ initialise its pose (two-view essential matrix for the first pair, PnP against
 existing landmarks after), triangulate tracks now seen from >= 2 keyframes,
 rebuild a NonlinearFactorGraph over the last `window` keyframes and solve with
 Levenberg-Marquardt. The two oldest in-window poses get tight priors: that
-anchors the gauge AND the scale (monocular, no depth factors). Keyframes that
+anchors the gauge and the scale (monocular); with metric depth only one is
+needed. Relative (network) depth is scaled per keyframe to the triangulated
+landmarks before it is used, so it adds consistency, not metres. Keyframes that
 leave the window keep their last solved pose. Non-keyframes get a PnP pose,
 stored relative to their keyframe so later refinements carry over.
 """
@@ -54,7 +56,8 @@ class SlidingWindowBackend:
         self.K_np = intrinsics.K
         self.K = gtsam.Cal3_S2(intrinsics.fx, intrinsics.fy, 0.0, intrinsics.cx, intrinsics.cy)
         self.K_inv = np.linalg.inv(intrinsics.K)
-        self.depth_obs = {}   # track_id -> {kf_idx: measured depth (m)}, when depth is enabled
+        self.depth_obs = {}   # track_id -> {kf_idx: depth as read from the map}, when depth is enabled
+        self.depth_scale = {} # kf_idx -> factor applied to that keyframe's depths (1 for metric sources)
         self.poses = {}       # kf_idx -> T_w_c (4x4)
         self.landmarks = {}   # track_id -> xyz (3,) world
         self.obs = {}         # track_id -> [(kf_idx, uv)]
@@ -93,8 +96,11 @@ class SlidingWindowBackend:
             T = self._pnp(tracks)
             self.poses[i] = self._predict() if T is None else T
         n_new = self._triangulate_new(i)
-        if i == 1 and self.cfg.depth.enabled:
-            self._set_metric_scale()
+        if self.cfg.depth.enabled:
+            if self.cfg.depth.source == "relative":
+                self._fit_depth_scales()
+            elif i == 1:
+                self._set_metric_scale()
         self.frames.append((tracks.timestamp, tracks.name, i, np.eye(4)))
         self.frame_obs.append((tracks.track_ids.copy(), tracks.uv.astype(float)))
         before = self.reprojection_error(len(self.frames) - 1)
@@ -163,6 +169,33 @@ class SlidingWindowBackend:
             if i in d and j in d:
                 ids.append(tid); ui.append(d[i]); uj.append(d[j])
         return np.array(ids), np.array(ui).reshape(-1, 2), np.array(uj).reshape(-1, 2)
+
+    def _measured_depth(self, tid, k):
+        """Depth to constrain (tid, kf k) with, or None: read value times the
+        keyframe's fitted scale (relative source) or 1 (metric source)."""
+        d = self.depth_obs.get(tid, {}).get(k)
+        if d is None:
+            return None
+        s = self.depth_scale.get(k, 1.0 if self.cfg.depth.source == "metric" else None)
+        return None if s is None else d * s
+
+    def _fit_depth_scales(self):
+        """Relative depth: for every keyframe without a scale yet, s = median over
+        its anchors (tracks with a depth AND a landmark) of landmark depth /
+        predicted depth. Fitted once, then frozen; too few anchors -> retried next
+        keyframe, no depth factors meanwhile."""
+        for k in self.poses:
+            if k in self.depth_scale:
+                continue
+            ratios = []
+            for tid, dk in self.depth_obs.items():
+                if k in dk and tid in self.landmarks:
+                    z = self._depth(self.poses[k], self.landmarks[tid])
+                    if z > 0:
+                        ratios.append(z / dk[k])
+            if len(ratios) >= self.cfg.depth.min_anchors:
+                self.depth_scale[k] = float(np.median(ratios))
+                log.info(f"kf {k} depth scale x{self.depth_scale[k]:.3f} from {len(ratios)} anchors")
 
     def _set_metric_scale(self):
         """After the unit-baseline init: scale the map so triangulated depths match
@@ -262,8 +295,10 @@ class SlidingWindowBackend:
         graph, values = gtsam.NonlinearFactorGraph(), gtsam.Values()
         for i in window:
             values.insert(X(i), gtsam.Pose3(self.poses[i]))
-        # gauge anchor; without depth the second prior also pins the (arbitrary) scale
-        for i in window[:1 if self.cfg.depth.enabled else 2]:
+        # gauge anchor; the second prior pins the (arbitrary) monocular scale, which only
+        # metric depth makes observable
+        metric = self.cfg.depth.enabled and self.cfg.depth.source == "metric"
+        for i in window[:1 if metric else 2]:
             graph.add(gtsam.PriorFactorPose3(X(i), gtsam.Pose3(self.poses[i]), self.prior_noise))
         active, fixed, n_depth = {}, set(), 0
         for tid, xyz in self.landmarks.items():
@@ -280,8 +315,8 @@ class SlidingWindowBackend:
                     graph.add(gtsam.PriorFactorPose3(X(i), gtsam.Pose3(self.poses[i]), self.fixed_noise))
                     fixed.add(i)
                 graph.add(gtsam.GenericProjectionFactorCal3_S2(uv, self.pix_noise, X(i), L(tid), self.K))
-                d = self.depth_obs.get(tid, {}).get(i)
-                if d is not None and self.cfg.depth.enabled:
+                d = self._measured_depth(tid, i) if self.cfg.depth.enabled else None
+                if d is not None:
                     graph.add(make_depth_factor(X(i), L(tid), d, uv, self.K_inv, self.cfg.depth.sigma_rel, self.cfg.huber_k))
                     n_depth += 1
         if not active:

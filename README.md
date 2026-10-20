@@ -50,6 +50,7 @@ Reference numbers on TUM freiburg1_xyz (798 frames, ~30 s on a laptop CPU):
 | orb | window | 4.7 cm | n/a (monocular) | arbitrary |
 | klt | window_depth | 4.3 cm | 4.3 cm | metric (0.99) |
 | orb | window_depth | 4.4 cm | 4.4 cm | metric (0.98) |
+| klt | window_depth, `depth.source=relative` | 4.9 cm | n/a (monocular) | arbitrary |
 
 ### Intrinsics file
 
@@ -94,6 +95,19 @@ vo.save("outputs/my_run")       # traj.txt, sparse/0, reproj.csv
 `reproj.csv` has one row per frame: observations with a landmark, rms and median
 reprojection error before and after that frame's solve, and against the final map.
 With `backend="window_depth"` pass `depth=DepthSource(depth_dir, depth_scale, intr)`.
+
+### Depth sources
+
+`DepthSource` reads 16-bit PNG or float `.npy` maps paired to frames by file stem or
+nearest timestamp. `backend.depth.source` says what the values mean:
+
+- `metric` (default): sensor depth or a metric network. Each observation gets a range
+  factor with relative noise `sigma_rel`; the map becomes metric.
+- `relative`: a scale-ambiguous network. For each keyframe, the scale that maps its
+  predicted depths onto the landmarks it already sees (median ratio over at least
+  `min_anchors` of them) is fitted once, then its depths are used as above. The map
+  scale stays the monocular one; what relative depth adds is consistency between
+  frames, not metres. 
 
 ## 3D Gaussian Splatting demo
 
