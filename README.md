@@ -24,6 +24,7 @@ Python 3.13 and [uv](https://docs.astral.sh/uv/). Runs on macOS and Linux, CPU o
     uv run run.py dataset=tum_rgbd sequence=freiburg1_xyz viewer=true   # watch it live (browser)
     uv run run.py dataset=tum_rgbd sequence=freiburg1_xyz 'stages=[viz]' # view a finished run
     uv run run.py dataset=tum_rgbd sequence=freiburg1_xyz frontend=orb backend=window_depth
+    uv run scripts/webcam.py my_calib.yaml                  # live from a webcam (or --source clip.mp4)
 
 Results go to `outputs/<dataset>/<sequence>/<frontend>_<backend>/`:
 
