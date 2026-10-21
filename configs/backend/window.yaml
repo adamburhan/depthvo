@@ -7,6 +7,9 @@ lm_max_iters: 20
 ransac_px: 1.0       # essential matrix / PnP inlier threshold
 max_reproj_px: 2.0   # triangulation acceptance and post-solve landmark cull
 min_parallax_deg: 1.0
+init:                # two-view initialisation, retried on each keyframe until it yields a map
+  min_landmarks: 50  # triangulated landmarks (passing the gates above) to accept an init pair
+  min_shared: 30     # fewer tracks shared with the reference keyframe: the reference moves on
 depth:               # per-observation depth constraints from dataset.depth_dir
   enabled: false
   source: metric     # metric: sensor / metric network, makes the map metric

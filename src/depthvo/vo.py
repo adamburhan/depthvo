@@ -32,6 +32,7 @@ class FrameResult:
     timestamp: float
     pose: np.ndarray              # T_w_c (4x4) as estimated at this step
     is_keyframe: bool
+    state: str                    # "initializing" (no map yet, pose = identity) | "tracking"
     n_tracks: int                 # 2D observations reported by the frontend
     reproj_before: ReprojStats    # this frame's observations vs the map, pose from PnP / init
     reproj_after: ReprojStats     # same after the window solve (keyframes; identical otherwise)
@@ -40,6 +41,8 @@ class FrameResult:
 
     def __str__(self):
         tag = "KF " if self.is_keyframe else "   "
+        if self.state != "tracking":
+            return f"{tag}{self.index:5d} {self.name}: {self.state}"
         return f"{tag}{self.index:5d} {self.name}: reproj {self.reproj_before} -> {self.reproj_after}"
 
 
@@ -82,7 +85,7 @@ class VisualOdometry:
             before = after = self.backend.reprojection_error(i)
             n_new, solve = 0, None
         r = FrameResult(i, frame.name, frame.timestamp, self.backend.pose(i), tracks.is_keyframe,
-                        len(tracks.uv), before, after, solve, n_new)
+                        self.backend.state, len(tracks.uv), before, after, solve, n_new)
         self.results.append(r)
         return r
 

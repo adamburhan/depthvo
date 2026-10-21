@@ -65,6 +65,7 @@ class SlidingWindowBackend:
         self.frames = []      # (timestamp, name, kf_idx, T_ckf_c) for every frame
         self.frame_obs = []   # (track_ids, uv) for EVERY frame, same order as self.frames
         self.bad = set()      # track ids culled as outliers; never retried
+        self.initialized = False   # False until a two-view init yields a usable map
         self.colors = {}      # track id -> gray intensity at first keyframe observation
         self.pix_noise = gtsam.noiseModel.Robust.Create(
             gtsam.noiseModel.mEstimator.Huber.Create(cfg.huber_k),
@@ -88,36 +89,80 @@ class SlidingWindowBackend:
                     d = depth[min(int(round(uv[1])), depth.shape[0] - 1), min(int(round(uv[0])), depth.shape[1] - 1)]
                     if np.isfinite(d) and self.cfg.depth.min_m <= d <= self.cfg.depth.max_m:
                         self.depth_obs.setdefault(tid, {})[i] = float(d)
-        if i == 0:
-            self.poses[0] = np.eye(4)
-        elif i == 1:
-            self.poses[1] = self._two_view_init(0, 1)
+        self.frame_obs.append((tracks.track_ids.copy(), tracks.uv.astype(float)))
+        if not self.initialized:
+            n_new = self._initialize(i)
+            self.frames.append((tracks.timestamp, tracks.name, i if self.initialized else self.reference, np.eye(4)))
+            if not self.initialized:
+                log.info(f"kf {i} ({tracks.name}): initializing, reference kf {self.reference}")
+                return 0, self.reprojection_error(len(self.frames) - 1), self.reprojection_error(len(self.frames) - 1), None
         else:
             T = self._pnp(tracks)
             self.poses[i] = self._predict() if T is None else T
-        n_new = self._triangulate_new(i)
-        if self.cfg.depth.enabled:
-            if self.cfg.depth.source == "relative":
-                self._fit_depth_scales()
-            elif i == 1:
-                self._set_metric_scale()
-        self.frames.append((tracks.timestamp, tracks.name, i, np.eye(4)))
-        self.frame_obs.append((tracks.track_ids.copy(), tracks.uv.astype(float)))
+            n_new = self._triangulate_new(i)
+            self.frames.append((tracks.timestamp, tracks.name, i, np.eye(4)))
+        if self.cfg.depth.enabled and self.cfg.depth.source == "relative":
+            self._fit_depth_scales()
         before = self.reprojection_error(len(self.frames) - 1)
-        solve = self._solve_window() if i >= 1 else None
+        solve = self._solve_window()
         after = self.reprojection_error(len(self.frames) - 1)
         log.info(f"kf {i} ({tracks.name}): +{n_new} landmarks, {len(self.landmarks)} total, "
                  f"reproj {before} -> {after}, {solve}")
         return n_new, before, after, solve
 
     def track_frame(self, tracks):
-        """Non-keyframe: PnP pose, stored relative to the latest keyframe."""
+        """Non-keyframe: PnP pose, stored relative to the latest keyframe. Before
+        initialisation every frame sits at the reference keyframe (identity)."""
+        self.frame_obs.append((tracks.track_ids.copy(), tracks.uv.astype(float)))
+        if not self.initialized:
+            self.frames.append((tracks.timestamp, tracks.name, self.reference, np.eye(4)))
+            return
         kf = len(self.kf_meta) - 1
         T_w_c = self._pnp(tracks)
         if T_w_c is None:
             T_w_c = self._predict()
         self.frames.append((tracks.timestamp, tracks.name, kf, inv(self.poses[kf]) @ T_w_c))
-        self.frame_obs.append((tracks.track_ids.copy(), tracks.uv.astype(float)))
+
+    @property
+    def state(self):
+        return "tracking" if self.initialized else "initializing"
+
+    @property
+    def reference(self):
+        """Keyframe the init is attempted against (the only posed one before init)."""
+        return max(self.poses) if self.poses else None
+
+    def _initialize(self, i):
+        """Two-view init of keyframe i against the reference, accepted only if it
+        yields >= cfg.init.min_landmarks triangulated landmarks. Rejected: keep waiting, or make i the new reference
+        once too few tracks are shared with the old one. -> landmarks created."""
+        if self.reference is None:
+            self.poses[i] = np.eye(4)
+            return 0
+        ref = self.reference
+        ids, ui, uj = self._corr(ref, i)
+        if len(ids) >= 8:
+            T, inliers = self._two_view_init(ref, i, ids, ui, uj)
+            self.poses[i] = T
+            had = set(self.landmarks)
+            n = self._triangulate_new(i)
+            if n >= self.cfg.init.min_landmarks:
+                for tid in ids[~inliers]:
+                    self._cull(tid)
+                self.initialized = True
+                if self.cfg.depth.enabled and self.cfg.depth.source == "metric":
+                    self._set_metric_scale()
+                log.info(f"initialized on kf {ref}-{i}: {n} landmarks")
+                return n
+            for tid in set(self.landmarks) - had:   # roll back the trial
+                del self.landmarks[tid]
+            del self.poses[i]
+            log.info(f"init kf {ref}-{i} rejected: {n} landmarks < {self.cfg.init.min_landmarks}")
+        if len(ids) < self.cfg.init.min_shared:
+            log.info(f"reference kf {ref} -> {i}: only {len(ids)} shared tracks")
+            self.poses = {i: np.eye(4)}
+            self.frames = [(t, n, i, rel) if k == ref else (t, n, k, rel) for t, n, k, rel in self.frames]
+        return 0
 
     def _predict(self):
         """Constant-velocity guess from the last two frame poses (PnP failed or no landmarks)."""
@@ -213,14 +258,14 @@ class SlidingWindowBackend:
             self.landmarks[tid] = self.landmarks[tid] * s
         log.info(f"metric scale from {len(ratios)} depths: x{s:.3f}")
 
-    def _two_view_init(self, i, j):
-        ids, ui, uj = self._corr(i, j)
+    def _two_view_init(self, i, j, ids, ui, uj):
+        """Essential matrix + recoverPose between keyframes i and j (unit baseline)
+        -> (T_w_cj, inlier mask over ids). No side effects."""
         E, inl = cv2.findEssentialMat(ui, uj, self.K_np, cv2.RANSAC, 0.999, self.cfg.ransac_px)
         _, R, t, inl = cv2.recoverPose(E, ui, uj, self.K_np, mask=inl)
-        for tid in ids[inl.ravel() == 0]:
-            self._cull(tid)
-        log.info(f"two-view init kf{i}-kf{j}: {int((inl > 0).sum())}/{len(ids)} inliers, unit baseline")
-        return self.poses[i] @ opencv_relative_to_T_c1_c2(R, t)
+        inliers = inl.ravel() > 0
+        log.info(f"two-view init kf{i}-kf{j}: {int(inliers.sum())}/{len(ids)} inliers, unit baseline")
+        return self.poses[i] @ opencv_relative_to_T_c1_c2(R, t), inliers
 
     def _pnp(self, tracks):
         has = [k for k, tid in enumerate(tracks.track_ids.tolist()) if tid in self.landmarks]
@@ -249,7 +294,10 @@ class SlidingWindowBackend:
         reprojection error and parallax angle pass."""
         n = 0
         for tid, ob in self.obs.items():
-            if tid in self.landmarks or ob[-1][0] != i or len(ob) < 2:
+            if tid in self.landmarks or ob[-1][0] != i:
+                continue
+            ob = [o for o in ob if o[0] in self.poses]
+            if len(ob) < 2:
                 continue
             (a, ua), (b, ub) = ob[0], ob[-1]
             Ta, Tb = self.poses[a], self.poses[b]

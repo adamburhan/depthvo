@@ -58,7 +58,7 @@ class LiveViewer:
             wxyz=self._wxyz(T), position=T[:3, 3])
         rp = (f"reproj {result.reproj_before.rms:.2f} -> {result.reproj_after.rms:.2f} px"
               if result.is_keyframe else f"reproj {result.reproj_after.rms:.2f} px")
-        self.status.content = (f"frame {frame.idx}  |  keyframes {self.n_kf}  |  "
+        self.status.content = (f"{result.state}  |  frame {frame.idx}  |  keyframes {self.n_kf}  |  "
                                f"landmarks {len(backend.landmarks)}  |  tracks {len(uv)}  |  {rp}")
         # pace to at most cfg.fps so the browser can keep up
         dt = 1.0 / self.cfg.fps - (time.time() - self.t_last)
