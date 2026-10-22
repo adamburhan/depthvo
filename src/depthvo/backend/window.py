@@ -66,6 +66,13 @@ class SlidingWindowBackend:
         self.frame_obs = []   # (track_ids, uv) for EVERY frame, same order as self.frames
         self.bad = set()      # track ids culled as outliers; never retried
         self.initialized = False   # False until a two-view init yields a usable map
+        self.lost = False          # tracking lost: no pose until a new keyframe starts a new segment
+        self.frame_state = []      # "initializing" | "tracking" | "lost" per frame
+        self.segment = 0           # current map segment; a new one starts after each tracking loss
+        self.segments = [dict(segment=0, start=0, end=None, lost_at=None)]
+        self.archive = {}          # closed segments: segment -> (poses, landmarks)
+        self.failed_streak = 0
+        self.last_pnp_inliers = 0
         self.colors = {}      # track id -> gray intensity at first keyframe observation
         self.pix_noise = gtsam.noiseModel.Robust.Create(
             gtsam.noiseModel.mEstimator.Huber.Create(cfg.huber_k),
@@ -74,10 +81,14 @@ class SlidingWindowBackend:
         self.fixed_noise = gtsam.noiseModel.Diagonal.Sigmas(np.full(6, 1e-6))
 
     # ---- per-frame API -------------------------------------------------------
+    # Every frame gets an entry in self.frames: (timestamp, name, segment, kf_idx, T_ckf_c)
+    # and a state: "initializing" (pose = reference keyframe), "tracking", or "lost"
+    # (segment -1, no pose). Tracking loss closes the segment: its poses and landmarks
+    # are archived and a new map is initialised, with its own world frame.
 
     def add_keyframe(self, tracks, gray=None, depth=None):
         """depth: optional (H, W) metres (NaN = none), sampled at the tracks when
-        cfg.depth.enabled."""
+        cfg.depth.enabled. -> (new landmarks, reproj before, reproj after, SolveStats)"""
         i = len(self.kf_meta)
         self.kf_meta.append((tracks.name, tracks.timestamp))
         for tid, uv in zip(tracks.track_ids.tolist(), tracks.uv):
@@ -90,53 +101,90 @@ class SlidingWindowBackend:
                     if np.isfinite(d) and self.cfg.depth.min_m <= d <= self.cfg.depth.max_m:
                         self.depth_obs.setdefault(tid, {})[i] = float(d)
         self.frame_obs.append((tracks.track_ids.copy(), tracks.uv.astype(float)))
+        f = len(self.frames)
         if not self.initialized:
-            n_new = self._initialize(i)
-            self.frames.append((tracks.timestamp, tracks.name, i if self.initialized else self.reference, np.eye(4)))
+            n_new = self._initialize(i, f)
             if not self.initialized:
+                self._add_frame(tracks, "initializing", self.reference, np.eye(4))
                 log.info(f"kf {i} ({tracks.name}): initializing, reference kf {self.reference}")
-                return 0, self.reprojection_error(len(self.frames) - 1), self.reprojection_error(len(self.frames) - 1), None
+                e = self.reprojection_error(f)
+                return 0, e, e, None
+            self._add_frame(tracks, "tracking", i, np.eye(4))
         else:
             T = self._pnp(tracks)
+            self._add_frame(tracks, "tracking", i, np.eye(4))
             self.poses[i] = self._predict() if T is None else T
+            if self._note_tracking(T, f):   # segment closed, poses already archived
+                return 0, self.reprojection_error(f), self.reprojection_error(f), None
             n_new = self._triangulate_new(i)
-            self.frames.append((tracks.timestamp, tracks.name, i, np.eye(4)))
         if self.cfg.depth.enabled and self.cfg.depth.source == "relative":
             self._fit_depth_scales()
-        before = self.reprojection_error(len(self.frames) - 1)
+        before = self.reprojection_error(f)
         solve = self._solve_window()
-        after = self.reprojection_error(len(self.frames) - 1)
+        after = self.reprojection_error(f)
         log.info(f"kf {i} ({tracks.name}): +{n_new} landmarks, {len(self.landmarks)} total, "
                  f"reproj {before} -> {after}, {solve}")
         return n_new, before, after, solve
 
     def track_frame(self, tracks):
-        """Non-keyframe: PnP pose, stored relative to the latest keyframe. Before
-        initialisation every frame sits at the reference keyframe (identity)."""
+        """Non-keyframe: PnP pose, stored relative to the latest keyframe."""
         self.frame_obs.append((tracks.track_ids.copy(), tracks.uv.astype(float)))
-        if not self.initialized:
-            self.frames.append((tracks.timestamp, tracks.name, self.reference, np.eye(4)))
+        f = len(self.frames)
+        if self.lost:
+            self._add_frame(tracks, "lost", None, None)
             return
-        kf = len(self.kf_meta) - 1
+        if not self.initialized:
+            self._add_frame(tracks, "initializing", self.reference, np.eye(4))
+            return
+        kf = max(self.poses)
         T_w_c = self._pnp(tracks)
-        if T_w_c is None:
-            T_w_c = self._predict()
-        self.frames.append((tracks.timestamp, tracks.name, kf, inv(self.poses[kf]) @ T_w_c))
+        T = self._predict() if T_w_c is None else T_w_c
+        self._add_frame(tracks, "tracking", kf, inv(self.poses[kf]) @ T)
+        self._note_tracking(T_w_c, f)
+
+    def _add_frame(self, tracks, state, kf, rel):
+        seg = -1 if state == "lost" else self.segment
+        self.frames.append((tracks.timestamp, tracks.name, seg, kf, rel))
+        self.frame_state.append(state)
+
+    def _note_tracking(self, T_pnp, f):
+        """Count consecutive frames without a usable PnP pose; declare the loss
+        once there are cfg.lost.max_failed_frames of them. -> True if lost now."""
+        ok = T_pnp is not None and self.last_pnp_inliers >= self.cfg.lost.min_inliers
+        self.failed_streak = 0 if ok else self.failed_streak + 1
+        if self.failed_streak < self.cfg.lost.max_failed_frames:
+            return False
+        first = f - self.failed_streak + 1          # the streak's frames only had predicted poses
+        for k in range(first, f + 1):
+            t, n, _, _, _ = self.frames[k]
+            self.frames[k], self.frame_state[k] = (t, n, -1, None, None), "lost"
+        self.segments[-1].update(end=first - 1, lost_at=first)
+        self.archive[self.segment] = (self.poses, self.landmarks)
+        self.poses, self.landmarks = {}, {}
+        self.initialized, self.lost, self.failed_streak = False, True, 0
+        log.warning(f"tracking lost at frame {first}: segment {self.segment} closed, waiting for a new keyframe")
+        return True
 
     @property
     def state(self):
-        return "tracking" if self.initialized else "initializing"
+        return "lost" if self.lost else ("tracking" if self.initialized else "initializing")
 
     @property
     def reference(self):
         """Keyframe the init is attempted against (the only posed one before init)."""
         return max(self.poses) if self.poses else None
 
-    def _initialize(self, i):
+    def _initialize(self, i, f):
         """Two-view init of keyframe i against the reference, accepted only if it
-        yields >= cfg.init.min_landmarks triangulated landmarks. Rejected: keep waiting, or make i the new reference
+        yields >= cfg.init.min_landmarks triangulated landmarks (same gates as
+        later triangulation). Rejected: keep waiting, or make i the new reference
         once too few tracks are shared with the old one. -> landmarks created."""
-        if self.reference is None:
+        if self.reference is None:                   # first keyframe of a (new) segment
+            if self.lost:
+                self.lost = False
+                self.segment += 1
+                self.segments.append(dict(segment=self.segment, start=f, end=None, lost_at=None))
+                log.info(f"segment {self.segment} starts at frame {f} (kf {i})")
             self.poses[i] = np.eye(4)
             return 0
         ref = self.reference
@@ -161,34 +209,43 @@ class SlidingWindowBackend:
         if len(ids) < self.cfg.init.min_shared:
             log.info(f"reference kf {ref} -> {i}: only {len(ids)} shared tracks")
             self.poses = {i: np.eye(4)}
-            self.frames = [(t, n, i, rel) if k == ref else (t, n, k, rel) for t, n, k, rel in self.frames]
+            self.frames = [(t, n, sg, i, rel) if k == ref else (t, n, sg, k, rel) for t, n, sg, k, rel in self.frames]
         return 0
 
     def _predict(self):
         """Constant-velocity guess from the last two frame poses (PnP failed or no landmarks)."""
-        if len(self.frames) < 2:
-            return self.current_pose()
-        T1, T0 = self.current_pose(), self.poses[self.frames[-2][2]] @ self.frames[-2][3]
+        posed = [k for k in range(len(self.frames)) if self.frames[k][2] == self.segment and self.frames[k][3] in self.poses]
+        if len(posed) < 2:
+            return self.current_pose() if posed else np.eye(4)
+        T1, T0 = self.pose(posed[-1]), self.pose(posed[-2])
         return T1 @ (inv(T0) @ T1)
 
     def current_pose(self):
         return self.pose(len(self.frames) - 1)
 
     def pose(self, frame):
-        """T_w_c of a processed frame (by index in processing order), as of now:
-        keyframe refinements since then are included."""
-        t, n, k, rel = self.frames[frame]
-        return self.poses[k] @ rel
+        """T_w_c of a processed frame (index in processing order) in its segment's
+        world frame, as of now (later keyframe refinements included). None if lost."""
+        t, n, seg, k, rel = self.frames[frame]
+        if seg < 0:
+            return None
+        poses = self.archive[seg][0] if seg in self.archive else self.poses   # archived once its loss is declared
+        return poses[k] @ rel
 
     def reprojection_error(self, frame) -> ReprojStats:
         """Reprojection error of a frame's observations against the CURRENT pose
-        and landmarks. Keyframes: all their tracks with a landmark. Other frames:
-        the tracks PnP saw. Re-asking later reflects later refinements."""
+        and landmarks of its segment. Keyframes: all their tracks with a landmark.
+        Other frames: the tracks PnP saw. Re-asking later reflects later refinements."""
+        T = self.pose(frame)
+        if T is None:
+            return ReprojStats(0, float("nan"), float("nan"))
+        seg = self.frames[frame][2]
+        landmarks = self.archive[seg][1] if seg in self.archive else self.landmarks
         ids, uv = self.frame_obs[frame]
-        T_c_w = inv(self.pose(frame))
+        T_c_w = inv(T)
         errs = []
         for tid, p in zip(ids.tolist(), uv):
-            xyz = self.landmarks.get(tid)
+            xyz = landmarks.get(tid)
             if xyz is None:
                 continue
             q = self.K_np @ (T_c_w @ np.append(xyz, 1.0))[:3]
@@ -200,9 +257,15 @@ class SlidingWindowBackend:
         return ReprojStats(len(e), float(np.sqrt(np.mean(e**2))), float(np.median(e)))
 
     def trajectory(self):
-        """-> (timestamps, names, [T_w_c]) for every frame, keyframes refined."""
-        ts, names, T = zip(*[(t, n, self.poses[k] @ rel) for t, n, k, rel in self.frames])
-        return list(ts), list(names), list(T)
+        """(timestamps, names, segments, [T_w_c]) for every frame with a pose; lost
+        frames are skipped. Poses are in their segment's world frame."""
+        rows = [(t, n, sg, self.pose(k)) for k, (t, n, sg, _, _) in enumerate(self.frames) if sg >= 0]
+        ts, names, segs, T = zip(*rows) if rows else ((), (), (), ())
+        return list(ts), list(names), list(segs), list(T)
+
+    def segment_maps(self):
+        """{segment: (poses, landmarks)} for every segment, current one included."""
+        return {**self.archive, self.segment: (self.poses, self.landmarks)}
 
     # ---- geometry ------------------------------------------------------------
 
@@ -269,6 +332,7 @@ class SlidingWindowBackend:
 
     def _pnp(self, tracks):
         has = [k for k, tid in enumerate(tracks.track_ids.tolist()) if tid in self.landmarks]
+        self.last_pnp_inliers = 0
         if len(has) < 6:
             return None
         xyz = np.array([self.landmarks[tracks.track_ids[k]] for k in has])
@@ -282,6 +346,7 @@ class SlidingWindowBackend:
             log.info(f"pnp failed: ok={ok} inliers={0 if inl is None else len(inl)}/{len(has)}")
             return None
         inl = inl.ravel()
+        self.last_pnp_inliers = len(inl)
         rvec, tvec = cv2.solvePnPRefineLM(xyz[inl], uv[inl], self.K_np, None, rvec, tvec)
         T_w_c = inv(se3(cv2.Rodrigues(rvec)[0], tvec))
         step = np.linalg.norm(T_w_c[:3, 3] - self.poses[max(self.poses)][:3, 3])

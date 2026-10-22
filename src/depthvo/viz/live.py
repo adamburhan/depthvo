@@ -53,9 +53,10 @@ class LiveViewer:
             self.n_kf += 1
             self._update_map(backend)
         T = result.pose
-        self.server.scene.add_camera_frustum(
-            "/current", self.fov, self.aspect, scale=self.cfg.frustum_scale, color=(255, 80, 0),
-            wxyz=self._wxyz(T), position=T[:3, 3])
+        if T is not None:
+            self.server.scene.add_camera_frustum(
+                "/current", self.fov, self.aspect, scale=self.cfg.frustum_scale, color=(255, 80, 0),
+                wxyz=self._wxyz(T), position=T[:3, 3])
         rp = (f"reproj {result.reproj_before.rms:.2f} -> {result.reproj_after.rms:.2f} px"
               if result.is_keyframe else f"reproj {result.reproj_after.rms:.2f} px")
         self.status.content = (f"{result.state}  |  frame {frame.idx}  |  keyframes {self.n_kf}  |  "

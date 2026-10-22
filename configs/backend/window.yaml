@@ -7,6 +7,9 @@ lm_max_iters: 20
 ransac_px: 1.0       # essential matrix / PnP inlier threshold
 max_reproj_px: 2.0   # triangulation acceptance and post-solve landmark cull
 min_parallax_deg: 1.0
+lost:                # tracking loss: the segment is closed and a new map is initialised
+  min_inliers: 15    # PnP inliers below this count as a failed frame
+  max_failed_frames: 10   # consecutive failed frames (poses predicted meanwhile) before declaring the loss
 init:                # two-view initialisation, retried on each keyframe until it yields a map
   min_landmarks: 50  # triangulated landmarks (passing the gates above) to accept an init pair
   min_shared: 30     # fewer tracks shared with the reference keyframe: the reference moves on

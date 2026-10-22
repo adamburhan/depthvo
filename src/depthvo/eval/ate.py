@@ -18,9 +18,13 @@ def associate(ts_est, ts_gt, max_dt=0.02):
     return pairs
 
 
-def ate_rmse(est_path, gt_path, with_scale=True, max_dt=0.02, plot_path=None):
+def ate_rmse(est_path, gt_path, with_scale=True, max_dt=0.02, plot_path=None, t_range=None):
+    """t_range: (t0, t1) restricts the estimate to that timestamp interval (one map segment)."""
     ts_e, P_e = read_tum(est_path)
     ts_g, P_g = read_tum(gt_path)
+    if t_range is not None:
+        keep = [k for k, t in enumerate(ts_e) if t_range[0] <= t <= t_range[1]]
+        ts_e, P_e = [ts_e[k] for k in keep], [P_e[k] for k in keep]
     pairs = associate(ts_e, ts_g, max_dt)
     if len(pairs) < 3:
         raise ValueError(f"only {len(pairs)} associated poses")

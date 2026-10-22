@@ -40,8 +40,9 @@ def stage_vo(cfg: DictConfig) -> None:
         if viewer:
             viewer.update(frame, r, vo)
     out = vo.save(cfg.output_dir)
-    kf = vo.keyframes
-    log.info(f"wrote {len(vo.results)} poses ({len(kf)} keyframes) to {out}: traj.txt, sparse/0, reproj.csv")
+    kf = [r for r in vo.keyframes if r.state == "tracking"]
+    log.info(f"wrote {len(vo.results)} frames ({len(kf)} keyframes, {len(vo.segments)} segment(s)) to {out}: "
+             f"traj.txt, sparse/<segment>, reproj.csv, segments.csv")
     log.info(f"keyframe reprojection rms, mean over keyframes: before solve "
              f"{np.nanmean([r.reproj_before.rms for r in kf[1:]]):.2f} px -> after {np.nanmean([r.reproj_after.rms for r in kf[1:]]):.2f} px")
     if viewer:
@@ -64,10 +65,24 @@ def stage_eval(cfg: DictConfig) -> None:
     if cfg.dataset.gt_trajectory is None:
         log.warning("no gt_trajectory for this dataset, skipping ATE")
         return
-    res = ate_rmse(out / "traj.txt", cfg.dataset.gt_trajectory, plot_path=out / "ate.png")
-    (out / "ate.json").write_text(json.dumps(res, indent=2))
-    log.info(f"ATE RMSE {res['ate_rmse']:.4f} m (Sim3, scale {res['scale']:.3f}) / "
-             f"{res['ate_rmse_se3']:.4f} m (SE3) over {res['n']} poses, plot {out / 'ate.png'}")
+    # one ATE per map segment: segments have unrelated world frames
+    import csv
+    segs = list(csv.DictReader(open(out / "segments.csv"))) if (out / "segments.csv").exists() else []
+    stamps = {int(r["index"]): float(r["timestamp"]) for r in csv.DictReader(open(out / "reproj.csv"))} if segs else {}
+    results = []
+    for sg in segs or [None]:
+        t_range = (stamps[int(sg["start"])], stamps[int(sg["end"])]) if sg else None
+        tag = f"_seg{sg['segment']}" if sg and len(segs) > 1 else ""
+        try:
+            res = ate_rmse(out / "traj.txt", cfg.dataset.gt_trajectory, t_range=t_range, plot_path=out / f"ate{tag}.png")
+        except ValueError as e:
+            log.warning(f"segment {sg['segment'] if sg else 0}: {e}")
+            continue
+        res["segment"] = int(sg["segment"]) if sg else 0
+        results.append(res)
+        log.info(f"segment {res['segment']}: ATE RMSE {res['ate_rmse']:.4f} m (Sim3, scale {res['scale']:.3f}) / "
+                 f"{res['ate_rmse_se3']:.4f} m (SE3) over {res['n']} poses, plot {out / f'ate{tag}.png'}")
+    (out / "ate.json").write_text(json.dumps(results[0] if len(results) == 1 else results, indent=2))
 
 
 GS_REPO = Path(__file__).resolve().parent / "third_party" / "gaussian-splatting"

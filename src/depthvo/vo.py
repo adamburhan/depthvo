@@ -4,7 +4,7 @@
     for frame in ImageSequence(image_dir, intrinsics):
         r = vo.step(frame)                 # FrameResult: pose, keyframe flag, reprojection stats
     vo.pose(i), vo.reprojection_error(i)   # any processed frame, against the current map
-    vo.trajectory(); vo.save(out_dir)      # traj.txt, sparse/0 (COLMAP), reproj.csv
+    vo.trajectory(); vo.save(out_dir)      # traj.txt, sparse/<segment> (COLMAP), reproj.csv, segments.csv
 
 `frontend` / `backend` are names of files in configs/frontend and configs/backend,
 or config objects (dict / OmegaConf) with the same fields. With backend depth
@@ -30,9 +30,10 @@ class FrameResult:
     index: int                    # position in processing order (= argument for vo.pose / reprojection_error)
     name: str
     timestamp: float
-    pose: np.ndarray              # T_w_c (4x4) as estimated at this step
+    pose: np.ndarray | None       # T_w_c (4x4) at this step, in its segment's world frame; None if lost
     is_keyframe: bool
-    state: str                    # "initializing" (no map yet, pose = identity) | "tracking"
+    state: str                    # "initializing" (pose = reference keyframe) | "tracking" | "lost"
+    segment: int                  # map segment (a new one starts after every tracking loss); -1 if lost
     n_tracks: int                 # 2D observations reported by the frontend
     reproj_before: ReprojStats    # this frame's observations vs the map, pose from PnP / init
     reproj_after: ReprojStats     # same after the window solve (keyframes; identical otherwise)
@@ -85,8 +86,13 @@ class VisualOdometry:
             before = after = self.backend.reprojection_error(i)
             n_new, solve = 0, None
         r = FrameResult(i, frame.name, frame.timestamp, self.backend.pose(i), tracks.is_keyframe,
-                        self.backend.state, len(tracks.uv), before, after, solve, n_new)
+                        self.backend.frame_state[i], self.backend.frames[i][2],
+                        len(tracks.uv), before, after, solve, n_new)
         self.results.append(r)
+        if r.state == "lost":   # a loss relabels the preceding failed frames too
+            for old in self.results[-self.backend.cfg.lost.max_failed_frames - 1:]:
+                old.state, old.segment, old.pose = (self.backend.frame_state[old.index],
+                                                    self.backend.frames[old.index][2], self.backend.pose(old.index))
         return r
 
     # ---- queries, any time after step() --------------------------------------
@@ -99,8 +105,13 @@ class VisualOdometry:
         return self.backend.reprojection_error(self._index(frame))
 
     def trajectory(self):
-        """(timestamps, names, [T_w_c]) for every processed frame."""
+        """(timestamps, names, segments, [T_w_c]) for every frame with a pose."""
         return self.backend.trajectory()
+
+    @property
+    def segments(self):
+        """One dict per map segment: segment, start, end, lost_at (frame indices)."""
+        return self.backend.segments
 
     @property
     def keyframes(self):
@@ -114,21 +125,29 @@ class VisualOdometry:
 
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
-        ts, names, poses = self.trajectory()
+        ts, names, segs, poses = self.trajectory()
         write_tum(out / "traj.txt", ts, poses)
         b = self.backend
-        write_colmap_model(out / "sparse" / "0", self.intrinsics, [n for n, _ in b.kf_meta], b.poses,
-                           b.landmarks, b.obs, {t: (g, g, g) for t, g in b.colors.items()})
+        colors = {t: (g, g, g) for t, g in b.colors.items()}
+        for seg, (poses_s, landmarks_s) in b.segment_maps().items():
+            if len(poses_s) >= 2:   # COLMAP convention: disconnected models in sparse/0, sparse/1, ...
+                write_colmap_model(out / "sparse" / str(seg), self.intrinsics, [n for n, _ in b.kf_meta],
+                                   poses_s, landmarks_s, b.obs, colors)
+        with open(out / "segments.csv", "w") as f:
+            f.write("segment,start,end,lost_at\n")
+            for sg in b.segments:
+                end = sg["end"] if sg["end"] is not None else len(self.results) - 1
+                f.write(f"{sg['segment']},{sg['start']},{end},{'' if sg['lost_at'] is None else sg['lost_at']}\n")
         with open(out / "reproj.csv", "w") as f:
-            f.write("index,name,timestamp,is_keyframe,n_obs,rms_before,median_before,rms_after,median_after,rms_now,median_now\n")
+            f.write("index,name,timestamp,state,segment,is_keyframe,n_obs,rms_before,median_before,rms_after,median_after,rms_now,median_now\n")
             for r in self.results:
                 now = self.reprojection_error(r.index)
-                f.write(f"{r.index},{r.name},{r.timestamp:.6f},{int(r.is_keyframe)},{now.n},"
+                f.write(f"{r.index},{r.name},{r.timestamp:.6f},{r.state},{r.segment},{int(r.is_keyframe)},{now.n},"
                         f"{r.reproj_before.rms:.4f},{r.reproj_before.median:.4f},"
                         f"{r.reproj_after.rms:.4f},{r.reproj_after.median:.4f},{now.rms:.4f},{now.median:.4f}\n")
         return out
 
     def _index(self, frame):
         if isinstance(frame, str):
-            return next(i for i, (_, n, _, _) in enumerate(self.backend.frames) if n == frame)
+            return next(i for i, fr in enumerate(self.backend.frames) if fr[1] == frame)
         return int(frame)
