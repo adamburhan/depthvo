@@ -22,6 +22,22 @@ def frames_from_capture(source, intr):
         raise RuntimeError(f"cannot open video source {source!r}")
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, intr.width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, intr.height)
+    
+    # Webcam warm-up
+    for i in range(100):
+        ret, frame = cap.read()
+ 
+        if ret and frame is not None:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+ 
+            if gray.std() > 5.0:
+                print(f"Webcam ready after {i + 1} frames")
+                break
+    else:
+        cap.release()
+        raise RuntimeError("Webcam initialization failed")
+    
+    
     idx, t0 = 0, time.time()
     while True:
         ok, bgr = cap.read()

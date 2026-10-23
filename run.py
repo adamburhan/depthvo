@@ -52,7 +52,7 @@ def stage_vo(cfg: DictConfig) -> None:
 def stage_viz(cfg: DictConfig) -> None:
     from depthvo.viz.viewer import serve
     v = cfg.viewer_opts
-    serve(Path(cfg.output_dir) / "sparse" / "0", v.port, v.frustum_scale, v.point_size)
+    serve(Path(cfg.output_dir) / "sparse", v.port, v.frustum_scale, v.point_size)
 
 
 def stage_eval(cfg: DictConfig) -> None:

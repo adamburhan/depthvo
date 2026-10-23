@@ -57,6 +57,14 @@ class LiveViewer:
             self.server.scene.add_camera_frustum(
                 "/current", self.fov, self.aspect, scale=self.cfg.frustum_scale, color=(255, 80, 0),
                 wxyz=self._wxyz(T), position=T[:3, 3])
+        if result.state == "lost" and backend.segments[-1]["lost_at"] is not None:
+            # red frustum at the last confirmed pose before the loss (the lost frames have none)
+            seg = backend.segments[-1]
+            T_last = backend.pose(seg["lost_at"] - 1)
+            if T_last is not None:
+                self.server.scene.add_camera_frustum(
+                    f"/lost/{seg['segment']}", self.fov, self.aspect, scale=self.cfg.frustum_scale,
+                    color=(230, 30, 30), wxyz=self._wxyz(T_last), position=T_last[:3, 3])
         rp = (f"reproj {result.reproj_before.rms:.2f} -> {result.reproj_after.rms:.2f} px"
               if result.is_keyframe else f"reproj {result.reproj_after.rms:.2f} px")
         self.status.content = (f"{result.state}  |  frame {frame.idx}  |  keyframes {self.n_kf}  |  "
