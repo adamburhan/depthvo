@@ -73,6 +73,7 @@ class SlidingWindowBackend:
         self.archive = {}          # closed segments: segment -> (poses, landmarks)
         self.failed_streak = 0
         self.last_pnp_inliers = 0
+        self.resume_pose = np.eye(4)  # where the next segment starts: last confirmed pose, extrapolated
         self.colors = {}      # track id -> gray intensity at first keyframe observation
         self.pix_noise = gtsam.noiseModel.Robust.Create(
             gtsam.noiseModel.mEstimator.Huber.Create(cfg.huber_k),
@@ -159,6 +160,8 @@ class SlidingWindowBackend:
             t, n, _, _, _ = self.frames[k]
             self.frames[k], self.frame_state[k] = (t, n, -1, None, None), "lost"
         self.segments[-1].update(end=first - 1, lost_at=first)
+        if self.cfg.lost.continue_from_last_pose:
+            self.resume_pose = self._predict()
         self.archive[self.segment] = (self.poses, self.landmarks)
         self.poses, self.landmarks = {}, {}
         self.initialized, self.lost, self.failed_streak = False, True, 0
@@ -185,7 +188,7 @@ class SlidingWindowBackend:
                 self.segment += 1
                 self.segments.append(dict(segment=self.segment, start=f, end=None, lost_at=None))
                 log.info(f"segment {self.segment} starts at frame {f} (kf {i})")
-            self.poses[i] = np.eye(4)
+            self.poses[i] = self.resume_pose.copy()   # seam is a guess: the motion while lost was not observed
             return 0
         ref = self.reference
         ids, ui, uj = self._corr(ref, i)
@@ -208,7 +211,7 @@ class SlidingWindowBackend:
             log.info(f"init kf {ref}-{i} rejected: {n} landmarks < {self.cfg.init.min_landmarks}")
         if len(ids) < self.cfg.init.min_shared:
             log.info(f"reference kf {ref} -> {i}: only {len(ids)} shared tracks")
-            self.poses = {i: np.eye(4)}
+            self.poses = {i: self.poses[ref]}
             self.frames = [(t, n, sg, i, rel) if k == ref else (t, n, sg, k, rel) for t, n, sg, k, rel in self.frames]
         return 0
 
